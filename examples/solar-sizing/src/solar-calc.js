@@ -46,6 +46,11 @@ export const DEFAULT_INPUT = Object.freeze({
   },
   battery: { enabled: false, autonomyDays: 1, dodPct: 90, systemVoltage: 48, roundTripEffPct: 95 },
   cable: { enabled: true, lengthM: 20, crossSectionMm2: 4, material: 'copper' },
+  /** A contractor's proposed layout and claims; when enabled it replaces the auto layout. */
+  contractor: {
+    enabled: false, modulesPerString: 11, strings: 1, inverterCount: 1,
+    claimedKwp: Number.NaN, claimedAnnualKwh: Number.NaN,
+  },
 });
 
 const round = (x, dp = 2) => Math.round(x * 10 ** dp) / 10 ** dp;
@@ -155,13 +160,15 @@ const POSITIVE = {
   inverter: ['acKw', 'maxDcVoltage', 'mpptMinV', 'mpptMaxV', 'mpptCount', 'maxInputCurrentA', 'maxStringsPerMppt'],
   battery: ['autonomyDays', 'dodPct', 'systemVoltage', 'roundTripEffPct'],
   cable: ['lengthM', 'crossSectionMm2'],
+  contractor: ['modulesPerString', 'strings', 'inverterCount'],
 };
+const OPTIONAL_GROUPS = new Set(['battery', 'cable', 'contractor']);
 
 /** Boundary validation. Returns a list of human-readable errors (empty when valid). */
 export function validateInput(input) {
   const errors = [];
   for (const [group, keys] of Object.entries(POSITIVE)) {
-    if ((group === 'battery' || group === 'cable') && !input[group]?.enabled) continue;
+    if (OPTIONAL_GROUPS.has(group) && !input[group]?.enabled) continue;
     for (const key of keys) {
       const v = input[group]?.[key];
       if (!Number.isFinite(v) || v <= 0) errors.push(`${group}.${key} must be a positive number`);
@@ -178,6 +185,14 @@ export function validateInput(input) {
   if (!(panel.tempCoeffPmaxPct < 0)) errors.push('panel.tempCoeffPmaxPct must be negative');
   if (inverter.mpptMinV >= inverter.mpptMaxV) errors.push('inverter.mpptMinV must be below inverter.mpptMaxV');
   if (inverter.mpptMaxV > inverter.maxDcVoltage) errors.push('inverter.mpptMaxV cannot exceed inverter.maxDcVoltage');
+  const { contractor = {} } = input;
+  if (contractor.enabled) {
+    for (const key of POSITIVE.contractor) {
+      if (Number.isFinite(contractor[key]) && !Number.isInteger(contractor[key])) {
+        errors.push(`contractor.${key} must be a whole number`);
+      }
+    }
+  }
   if (battery.enabled && (battery.dodPct > 100 || battery.roundTripEffPct > 100)) {
     errors.push('battery DoD and efficiency must be ≤ 100%');
   }
@@ -191,10 +206,13 @@ export function checkDesign(input) {
   const errors = validateInput(input);
   if (errors.length) return { ok: false, errors };
 
-  const { load, site, panel, inverter, battery, cable } = input;
+  const { load, site, panel, inverter, battery, cable, contractor } = input;
   const sizing = sizeArray({ ...site, dailyKwh: load.dailyKwh, panelWp: panel.wp });
   const limits = stringLimits(panel, inverter, site);
-  const layout = limits.maxModules >= limits.minModules ? chooseLayout(sizing.panelCount, limits, inverter) : null;
+  const fromContractor = Boolean(contractor?.enabled);
+  const layout = fromContractor
+    ? contractorLayout(contractor, inverter)
+    : limits.maxModules >= limits.minModules ? { ...chooseLayout(sizing.panelCount, limits, inverter), inverterCount: 1 } : null;
   const checks = [];
 
   if (!layout) {
@@ -215,7 +233,16 @@ export function checkDesign(input) {
   const stringVmpStc = round(m * panel.vmp);
   const mpptImp = round(layout.stringsPerMppt * panel.imp);
   const mpptIsc = round(layout.stringsPerMppt * panel.isc * 1.25);
-  const dcAcRatio = round(design.actualKwp / inverter.acKw);
+  const totalAcKw = round(inverter.acKw * layout.inverterCount, 3);
+  const dcAcRatio = round(design.actualKwp / totalAcKw);
+
+  if (fromContractor) {
+    const capacity = layout.inverterCount * inverter.mpptCount * inverter.maxStringsPerMppt;
+    checks.push(check('string-count', 'Strings fit the inverter inputs',
+      layout.strings <= capacity ? 'pass' : 'fail',
+      `${layout.strings} strings vs ${capacity} inputs (${layout.inverterCount} inverter × ` +
+      `${inverter.mpptCount} MPPT × ${inverter.maxStringsPerMppt})`));
+  }
 
   checks.push(check('voc-max', 'Max string Voc (cold) vs inverter max DC',
     stringVocMax <= inverter.maxDcVoltage ? 'pass' : 'fail',
@@ -245,13 +272,14 @@ export function checkDesign(input) {
 
   checks.push(check('dc-ac', 'DC/AC ratio',
     dcAcRatio >= 1 && dcAcRatio <= 1.3 ? 'pass' : dcAcRatio >= 0.8 && dcAcRatio <= 1.5 ? 'warn' : 'fail',
-    `${dcAcRatio} (${design.actualKwp} kWp / ${inverter.acKw} kW); typical 1.0–1.3`));
+    `${dcAcRatio} (${design.actualKwp} kWp / ${totalAcKw} kW); typical 1.0–1.3`));
 
   checks.push(check('energy', 'Array covers daily load',
     design.estDailyKwh >= load.dailyKwh ? 'pass' : 'warn',
     `${design.estDailyKwh} kWh/day estimated vs ${load.dailyKwh} kWh/day load`));
 
-  if (layout.totalModules !== sizing.panelCount) {
+  if (fromContractor) checks.push(...claimChecks(contractor, design));
+  else if (layout.totalModules !== sizing.panelCount) {
     checks.push(check('layout', 'Module count fits string layout', 'warn',
       `${sizing.panelCount} modules needed; nearest valid layout uses ${layout.totalModules} ` +
       `(${layout.strings} × ${m}).`));
@@ -294,6 +322,36 @@ export function checkDesign(input) {
     checks,
     summary: summarize(checks),
   };
+}
+
+function contractorLayout({ modulesPerString, strings, inverterCount }, inverter) {
+  return {
+    modulesPerString, strings, inverterCount,
+    totalModules: modulesPerString * strings,
+    stringsPerMppt: Math.ceil(strings / (inverterCount * inverter.mpptCount)),
+    source: 'contractor',
+  };
+}
+
+/** Compare a contractor's stated size and yield with what the design actually supports. */
+export function claimChecks({ claimedKwp, claimedAnnualKwh }, design) {
+  const out = [];
+  if (Number.isFinite(claimedKwp) && claimedKwp > 0) {
+    const diffPct = round(((claimedKwp - design.actualKwp) / design.actualKwp) * 100, 1);
+    out.push(check('claim-kwp', 'Stated array size matches modules × Wp',
+      Math.abs(diffPct) <= 2 ? 'pass' : 'fail',
+      `Stated ${claimedKwp} kWp vs ${design.actualKwp} kWp from the layout (${diffPct > 0 ? '+' : ''}${diffPct}%)`));
+  }
+  if (Number.isFinite(claimedAnnualKwh) && claimedAnnualKwh > 0) {
+    const ratio = claimedAnnualKwh / design.estAnnualKwh;
+    const overPct = round((ratio - 1) * 100, 1);
+    out.push(check('claim-yield', 'Stated annual production is realistic',
+      ratio <= 1.1 ? 'pass' : ratio <= 1.25 ? 'warn' : 'fail',
+      `Stated ${claimedAnnualKwh.toLocaleString('en-US')} kWh/yr vs ` +
+      `${design.estAnnualKwh.toLocaleString('en-US')} kWh/yr estimated ` +
+      `(${overPct > 0 ? '+' : ''}${overPct}%; >10% above the estimate needs justification)`));
+  }
+  return out;
 }
 
 function summarize(checks) {

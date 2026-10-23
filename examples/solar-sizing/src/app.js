@@ -1,10 +1,19 @@
 import { DEFAULT_INPUT, PSH_PRESETS, checkDesign, loadFromAppliances } from './solar-calc.js';
+import { applyImport, csvTemplate } from './design-import.js';
+import { bindDropZone, downloadText, importDesignFile, renderImportReport } from './upload.js';
 
 const STORAGE_KEY = 'solar-sizing-check:v1';
 const DAYS_PER_MONTH = 365 / 12;
 
 /** Form schema: [key, label, unit, step]. */
 const FIELDS = {
+  contractor: [
+    ['modulesPerString', 'Modules per string', '', 1],
+    ['strings', 'Number of strings', 'total', 1],
+    ['inverterCount', 'Number of inverters', '', 1],
+    ['claimedKwp', 'Stated array size', 'kWp', 0.01],
+    ['claimedAnnualKwh', 'Stated annual production', 'kWh/yr', 1],
+  ],
   site: [
     ['peakSunHours', 'Peak sun hours', 'h/day', 0.1],
     ['systemLossPct', 'System losses', '%', 1],
@@ -59,6 +68,7 @@ const el = (tag, props = {}, ...children) => {
 };
 
 let state = loadState();
+let importInfo = null; // { source, found, missing, previous } for the last uploaded design
 
 function defaultState() {
   return {
@@ -110,12 +120,14 @@ function buildFields() {
 
 function syncFormFromState() {
   for (const control of document.querySelectorAll('[data-group][data-key]')) {
-    control.value = state[control.dataset.group][control.dataset.key] ?? '';
+    const v = state[control.dataset.group][control.dataset.key];
+    control.value = typeof v === 'number' && !Number.isFinite(v) ? '' : v ?? '';
   }
   $('#dailyKwh').value = state.load.dailyKwh;
   $('#monthlyKwh').value = state.monthlyKwh;
   $('#battery-enabled').checked = state.battery.enabled;
   $('#cable-enabled').checked = state.cable.enabled;
+  $('#contractor-enabled').checked = state.contractor.enabled;
   document.querySelector(`input[name="loadMode"][value="${state.loadMode}"]`).checked = true;
   renderAppliances();
   showLoadMode();
@@ -148,8 +160,8 @@ function resolveDailyKwh() {
 }
 
 function designInput() {
-  const { site, panel, inverter, battery, cable } = state;
-  return { load: { dailyKwh: Math.round(resolveDailyKwh() * 100) / 100 }, site, panel, inverter, battery, cable };
+  const { site, panel, inverter, battery, cable, contractor } = state;
+  return { load: { dailyKwh: Math.round(resolveDailyKwh() * 100) / 100 }, site, panel, inverter, battery, cable, contractor };
 }
 
 function tile(label, value, unit = '') {
@@ -158,6 +170,13 @@ function tile(label, value, unit = '') {
 }
 
 function render(result, input) {
+  const source = $('#source');
+  source.hidden = !state.contractor.enabled;
+  source.replaceChildren(...(state.contractor.enabled
+    ? [el('strong', { textContent: 'Checking contractor design' }),
+      importInfo ? ` — ${importInfo.source}: ${importInfo.found} values imported` +
+        (importInfo.missing ? `, ${importInfo.missing} key values taken from the form` : '') : ' — entered manually']
+    : []));
   const errors = $('#errors');
   const verdict = $('#verdict');
   for (const c of document.querySelectorAll('input.invalid')) c.classList.remove('invalid');
@@ -207,8 +226,10 @@ function render(result, input) {
   ];
   if (layout) {
     rows.push(
-      ['Chosen layout', `${layout.strings} string(s) × ${layout.modulesPerString} modules`],
-      ['Strings per MPPT', `${layout.stringsPerMppt} (of ${input.inverter.mpptCount} MPPT)`],
+      [layout.source === 'contractor' ? 'Contractor layout' : 'Chosen layout',
+        `${layout.strings} string(s) × ${layout.modulesPerString} modules`],
+      ['Inverters', `${layout.inverterCount} × ${input.inverter.acKw} kW`],
+      ['Strings per MPPT', `${layout.stringsPerMppt} (of ${input.inverter.mpptCount} MPPT per inverter)`],
       ['String Voc max / Vmp STC / Vmp min', `${strings.stringVocMax} / ${strings.stringVmpStc} / ${strings.stringVmpMin} V`],
     );
   }
@@ -229,13 +250,18 @@ function bindEvents() {
   $('#form').addEventListener('input', (e) => {
     const t = e.target;
     if (t.dataset.group && t.dataset.key) {
-      state[t.dataset.group][t.dataset.key] = t.tagName === 'SELECT' ? t.value : t.valueAsNumber;
+      if (t.dataset.group === 'contractor' && t.dataset.key.startsWith('claimed') && t.value === '') {
+        state.contractor[t.dataset.key] = Number.NaN; // claim not stated
+      } else {
+        state[t.dataset.group][t.dataset.key] = t.tagName === 'SELECT' ? t.value : t.valueAsNumber;
+      }
       if (t.dataset.key === 'peakSunHours') $('#psh-preset').value = '';
     } else if (t.id === 'dailyKwh') state.load.dailyKwh = t.valueAsNumber;
     else if (t.id === 'monthlyKwh') state.monthlyKwh = t.valueAsNumber;
     else if (t.name === 'loadMode') { state.loadMode = t.value; showLoadMode(); }
     else if (t.id === 'battery-enabled') state.battery.enabled = t.checked;
     else if (t.id === 'cable-enabled') state.cable.enabled = t.checked;
+    else if (t.id === 'contractor-enabled') state.contractor.enabled = t.checked;
     else if (t.id === 'psh-preset' && t.value) {
       state.site.peakSunHours = Number(t.value);
       $('#site\\.peakSunHours').value = t.value;
@@ -247,19 +273,59 @@ function bindEvents() {
     state.appliances.push({ name: '', watts: 0, hoursPerDay: 0, qty: 1 });
     renderAppliances();
   };
-  $('#reset').onclick = () => { state = defaultState(); syncFormFromState(); toggleOptional(); update(); };
+  $('#reset').onclick = () => {
+    state = defaultState();
+    clearImport();
+    syncFormFromState(); toggleOptional(); update();
+  };
+  $('#template').onclick = () => downloadText('solar-design-template.csv', csvTemplate(designInput()), 'text/csv');
+  bindDropZone($('#dropzone'), $('#design-file'), handleFile);
   $('#print').onclick = () => window.print();
   $('#export').onclick = () => {
-    const blob = new Blob([JSON.stringify(update(), null, 2)], { type: 'application/json' });
-    const a = el('a', { href: URL.createObjectURL(blob), download: 'solar-design-check.json' });
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    const report = { ...update(), source: importInfo?.source ?? null };
+    downloadText('solar-design-check.json', JSON.stringify(report, null, 2), 'application/json');
   };
+}
+
+async function handleFile(file) {
+  const status = $('#import-status');
+  status.hidden = false;
+  status.className = 'import-status';
+  status.textContent = `Reading ${file.name}…`;
+  try {
+    const imported = await importDesignFile(file);
+    const previous = structuredClone(state);
+    const next = applyImport(designInput(), imported);
+    for (const group of Object.keys(DEFAULT_INPUT)) if (group !== 'load') state[group] = next[group];
+    if ('load.dailyKwh' in imported.values) { state.loadMode = 'daily'; state.load.dailyKwh = next.load.dailyKwh; }
+    importInfo = { source: imported.source, found: imported.found.length, missing: imported.missing.length, previous };
+    status.hidden = true;
+    renderImportReport($('#import-report'), imported, undoImport);
+    syncFormFromState();
+    toggleOptional();
+    update();
+  } catch (err) {
+    status.className = 'import-status error';
+    status.textContent = err.message;
+  }
+}
+
+function undoImport() {
+  if (importInfo?.previous) state = importInfo.previous;
+  clearImport();
+  syncFormFromState(); toggleOptional(); update();
+}
+
+function clearImport() {
+  importInfo = null;
+  $('#import-report').hidden = true;
+  $('#import-status').hidden = true;
 }
 
 function toggleOptional() {
   $('#battery-enabled').closest('fieldset').classList.toggle('off', !state.battery.enabled);
   $('#cable-enabled').closest('fieldset').classList.toggle('off', !state.cable.enabled);
+  $('#contractor-enabled').closest('fieldset').classList.toggle('off', !state.contractor.enabled);
 }
 
 buildFields();

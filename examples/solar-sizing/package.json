@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "node server.mjs",
-    "test": "node --test test/solar-calc.node-test.mjs"
+    "test": "node --test test/solar-calc.node-test.mjs test/design-import.node-test.mjs"
   },
   "engines": { "node": ">=20" },
   "license": "MIT"

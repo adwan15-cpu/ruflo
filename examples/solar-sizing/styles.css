@@ -123,6 +123,29 @@ input.invalid { border-color: var(--fail); }
 .strings td { padding: .3rem 0; border-bottom: 1px solid var(--border); }
 .strings td:last-child { text-align: right; font-weight: 500; }
 
+.dropzone {
+  display: flex; flex-direction: column; gap: .25rem; align-items: center; text-align: center;
+  border: 2px dashed var(--border); border-radius: 8px; padding: 1.25rem 1rem; cursor: pointer;
+}
+.dropzone:hover, .dropzone.drag { border-color: var(--accent); background: var(--bg); }
+.upload-actions { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin-top: .6rem; }
+.import-status { margin-top: .6rem; font-size: .9rem; }
+.import-status.error { color: var(--fail); }
+.import-report { margin-top: .75rem; font-size: .85rem; border-top: 1px solid var(--border); padding-top: .6rem; }
+.import-head { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; }
+.import-report p { margin: .4rem 0; }
+.warn-text { color: var(--warn); }
+.muted { color: var(--muted); }
+.import-table { width: 100%; border-collapse: collapse; margin-top: .4rem; table-layout: fixed; }
+.import-table th { text-align: left; color: var(--muted); font-weight: 500; }
+.import-table td, .import-table th { padding: .2rem .3rem; border-bottom: 1px solid var(--border); }
+.import-table th:first-child { width: 38%; }
+.import-table th:nth-child(2) { width: 22%; }
+.import-table .raw { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hint { margin: 0 0 .6rem; }
+.source { font-size: .85rem; color: var(--muted); margin-bottom: .6rem; }
+.source strong { color: var(--text); }
+
 @media print {
   .actions, .inputs { display: none; }
   .layout { grid-template-columns: 1fr; }

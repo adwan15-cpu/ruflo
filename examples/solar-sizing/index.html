@@ -23,6 +23,28 @@
 
   <main class="layout">
     <form id="form" class="inputs" novalidate>
+      <fieldset class="upload">
+        <legend>Check a contractor design</legend>
+        <label id="dropzone" class="dropzone">
+          <input type="file" id="design-file" accept=".pdf,.csv,.tsv,.txt,.json" hidden>
+          <strong>Drop a design file here or click to choose</strong>
+          <span class="unit">PDF proposal or datasheet (text, not scanned), CSV/TSV, TXT or JSON — up to 10 MB</span>
+        </label>
+        <div class="upload-actions">
+          <button type="button" id="template" class="small">Download CSV template</button>
+          <span class="unit">Send the template to contractors for an exact, machine-readable design.</span>
+        </div>
+        <div id="import-status" class="import-status" role="status" hidden></div>
+        <div id="import-report" class="import-report" hidden></div>
+      </fieldset>
+
+      <fieldset>
+        <legend><label><input type="checkbox" id="contractor-enabled"> Contractor layout &amp; claims</label></legend>
+        <p class="unit hint">When on, the checks use these strings instead of the layout the app would choose.
+          Leave a claim empty if the contractor did not state it.</p>
+        <div class="grid" data-group="contractor"></div>
+      </fieldset>
+
       <fieldset>
         <legend>Load</legend>
         <div class="seg" role="radiogroup" aria-label="Load input mode">
@@ -78,6 +100,7 @@
     </form>
 
     <section class="results" aria-live="polite">
+      <div id="source" class="source" hidden></div>
       <div id="verdict" class="verdict"></div>
       <div id="errors" class="errors" hidden></div>
       <div id="tiles" class="tiles"></div>
