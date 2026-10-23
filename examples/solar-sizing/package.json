@@ -1,0 +1,13 @@
+{
+  "name": "solar-sizing-check",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Web app to size a solar PV system and check string, inverter, battery and cable design limits",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test/solar-calc.node-test.mjs"
+  },
+  "engines": { "node": ">=20" },
+  "license": "MIT"
+}
